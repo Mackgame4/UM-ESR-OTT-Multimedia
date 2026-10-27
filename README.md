@@ -6,3 +6,15 @@ multimedia delivery, intended to be tested using the CORE network emulator.
 This initial structure separates networking, protocol, overlay management,
 routing, streaming, and monitoring for future implementation. The project
 initially uses only the Python standard library.
+
+Run the application from the project root:
+
+```sh
+python -m src.main
+```
+
+Run the tests:
+
+```sh
+python -m unittest discover -s tests
+```
