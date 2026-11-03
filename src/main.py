@@ -1,10 +1,11 @@
-"""Application entry point."""
+"""Run with python -m src.main from the project root."""
+
+from src.cli import run
 
 
 def main():
-    """Print a greeting."""
-    print("Hello, world!")
+    return run()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

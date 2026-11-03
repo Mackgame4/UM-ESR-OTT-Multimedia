@@ -1,4 +1,4 @@
-"""Tests for the application entry point."""
+"""CLI smoke tests without leaving a server running."""
 
 import subprocess
 import sys
@@ -7,17 +7,24 @@ from pathlib import Path
 
 
 class MainTests(unittest.TestCase):
-    """Check the application's command-line output."""
-
-    def test_hello_world(self):
-        """The entry point exits successfully and prints a greeting."""
-        project_root = Path(__file__).resolve().parents[1]
-        result = subprocess.run(
-            [sys.executable, "-m", "src.main"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=True,
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "src.main", *args],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=5,
         )
-        self.assertEqual(result.stdout, "Hello, world!\n")
-        self.assertEqual(result.stderr, "")
+
+    def test_help(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--peer", result.stdout)
+
+    def test_invalid_peer(self):
+        result = self.run_cli("--peer", "localhost:70000")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("65535", result.stderr)
+
+    def test_empty_node_id(self):
+        result = self.run_cli("--id", " ")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
