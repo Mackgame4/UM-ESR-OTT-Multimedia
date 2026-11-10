@@ -14,8 +14,8 @@ class TCPConnection:
         self.node_id = None
         self._send_lock = threading.Lock()
 
-    def send(self, message_type, node_id, text="HELLO"):
-        data = encode_message(message_type, node_id, text)
+    def send(self, message_type, node_id, text="HELLO", **fields):
+        data = encode_message(message_type, node_id, text, **fields)
         # Prevent messages from different sending threads from interleaving.
         with self._send_lock:
             self.socket.sendall(data)

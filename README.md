@@ -1,135 +1,151 @@
-# esr-ott
+﻿# esr-ott
 
-Universidade do Minho ESR TP2 project: an application-level overlay network for
-multimedia delivery, intended to be tested using the CORE network emulator.
+Universidade do Minho ESR TP2: application-level overlay network for multimedia
+delivery in the CORE emulator. Python standard library only. TCP carries control
+messages; UDP video streaming is reserved for a later stage.
 
-The application uses only the Python standard library. Stage 1 implements an
-overlay node that acts as both a TCP client and server, with persistent,
-full-duplex connections to manually configured neighbours.
+## Estratégia 2 — controlador e routers a pedido
 
-Transport protocol decisions:
+**Server1 é o servidor e bootstrapper e deve permanecer ativo.** O utilizador
+inicia manualmente apenas o servidor e os clientes. Server1 inicia os processos
+overlay nos routers necessários quando recebe o registo de um cliente.
 
-- **TCP** for control messages, including neighbour discovery, topology updates,
-  and routing information, because reliable, ordered delivery helps keep the
-  overlay network state consistent.
-- **UDP** for MJPEG video streaming, because it avoids retransmission delays and
-  allows timely delivery of new frames when packets are lost.
+Não existe configuração manual do overlay. Server1 lê a topologia física de
+[`topology/topology.xml`](topology/topology.xml) e identifica o router de acesso
+de cada cliente usando BFS. Só esse router executa a aplicação overlay e liga-se
+diretamente ao servidor. Os routers intermédios encaminham os pacotes por IP,
+através das rotas do CORE; não precisam de executar a aplicação.
 
-UDP streaming is reserved for a later stage; this stage implements TCP control.
+Para C1, o caminho calculado é:
 
-## Estratégia de construção do overlay
-
-Numa primeira fase, vamos utilizar a **estratégia 1 — abordagem manual**:
-os peers/nós vizinhos são indicados explicitamente no arranque da aplicação,
-através da opção `--peer HOST:PORT`, repetida para cada vizinho. Esta fase não
-necessita de um controlador.
-
-Com o avanço do desenvolvimento, vamos introduzir a **estratégia 2 — abordagem
-baseada num controlador**, responsável
-pelo registo de novos nós e pela indicação dos respetivos vizinhos. As ligações
-entre os nós e o streaming funcionarão diretamente entre os peers, sem depender
-da disponibilidade contínua do controlador. Se o controlador ficar indisponível,
-as ligações existentes continuam a funcionar; apenas ficam impedidos novos
-registos até o controlador voltar a estar disponível.
-
-### Estratégia 3 — bootstrap distribuído com substituição automática
-
-Como evolução a avaliar, cada nó terá capacidade para atuar como **bootstrapper**,
-participando na gestão distribuída dos registos e da informação sobre os vizinhos.
-Um dos nós assume o papel de bootstrapper ativo; se esse nó falhar, outro nó
-assume automaticamente esse papel. O objetivo é manter a rede em funcionamento
-e permitir novos registos após a substituição, sem depender de um controlador fixo.
-
-Esta estratégia exige partilha e atualização dos registos entre os nós, deteção
-de falhas e um mecanismo de eleição do novo bootstrapper. Os novos nós devem
-conhecer vários contactos de arranque para conseguirem contactar um nó disponível
-quando o anterior falhar. A recuperação das ligações e dos caminhos de streaming
-afetados pela falha terá de ser tratada em conjunto com a gestão do overlay.
-Esta alternativa distribuída ainda não está implementada.
-
-O principal desafio é distinguir “o bootstrapper morreu” de “não consigo comunicar com ele”. Por exemplo:
-1. A é o bootstrapper.
-2. B deixa de receber respostas de A e assume o papel.
-3. A continua ativo e acessível a outros nós.
-4. Passam a existir dois bootstrappers que podem atribuir vizinhos com informações diferentes.
-
-### Estratégia 4 — vários bootstrappers com topologia pré-configurada
-
-Para este projeto, a evolução recomendada é manter a estratégia 1 na fase inicial
-e avançar para um serviço de bootstrap redundante. Dois ou mais bootstrappers
-ficam disponíveis em simultâneo e usam a mesma versão de um ficheiro de
-configuração que associa cada identificador de nó aos seus endereços e vizinhos.
-A estratégia 2 pode servir como passo intermédio; a estratégia 3 mantém-se como
-alternativa caso seja necessário um registo global dinâmico com líder substituível.
-
-O funcionamento previsto é:
-
-1. O novo nó conhece uma lista de contactos de bootstrap e contacta um deles,
-   identificando-se.
-2. O bootstrapper devolve os vizinhos definidos na configuração para esse nó.
-3. Se o contacto falhar ou não responder dentro do tempo limite, o nó tenta outro
-   bootstrapper da lista.
-4. O nó estabelece ligações TCP diretamente com os vizinhos e mantém localmente
-   o estado dessas ligações. O streaming utiliza UDP entre os nós.
-
-Não existe um bootstrapper principal nem eleição: qualquer réplica pode responder
-à mesma consulta. O serviço fornece configuração; não mantém um registo global
-autoritativo dos nós ativos nem reserva recursos. Assim, não é necessário
-sincronizar registos dinâmicos entre bootstrappers. Enquanto existir um contacto
-de bootstrap acessível com a configuração correta, os nós previamente configurados
-podem obter vizinhos mesmo que outro bootstrapper falhe. As ligações existentes
-continuam independentes do serviço de bootstrap.
-
-Esta opção exige distribuir a mesma versão da configuração por todos os
-bootstrappers. Acrescentar um identificador de nó novo exige atualizar essa
-configuração; a lista devolvida também pode conter vizinhos desligados. A deteção
-de falhas, as novas tentativas de ligação e a recuperação dos caminhos de vídeo
-são responsabilidades separadas da gestão do overlay e do encaminhamento.
-Se todos os contactos de bootstrap ficarem inacessíveis, novos nós sem configuração
-local não conseguem obter vizinhos. Esta estratégia ainda não está implementada.
-
-  -- Fun thing:
-
-  in case an overlay node is running on a machine/router and it dies we can know the parent node and if still alive connect directly (this in overlay), if a node fails in the underlay we need another connection route
-
-Run two terminals from the project root (Python 3):
-
-```sh
-# Terminal A: listen on the default TCP port 5000
-python -m src.main --id A
-
-# Terminal B: listen on port 5001 and connect to A
-python -m src.main --id B --port 5001 --peer 127.0.0.1:5000
+```text
+Server1 <-> R3 <-> C1
+              <-> C2
 ```
 
-Both terminals should report `RX HELLO` from the other node. Each endpoint
-automatically sends one HELLO when a connection opens. The same TCP connection
-supports sending and receiving concurrently; there is no request/reply loop.
+1. C1 envia REGISTER para Server1, identificando-se.
+2. Server1 inicia a aplicação em R3 através de `vcmd`, no router existente
+   da sessão CORE. Não cria novos routers físicos.
+3. R3 regista-se e recebe Server1 como vizinho.
+4. C1 recebe R3 como vizinho e liga-se diretamente a ele por TCP.
+5. Cada ligação é full-duplex; apenas a extremidade mais distante de Server1
+   inicia a ligação.
 
-Interactive commands:
+Só são ativados os routers dos caminhos pedidos. C2 reutiliza os mesmos routers
+de C1. Os restantes routers continuam a encaminhar IP sem executar o overlay.
 
-- `/hello`: send HELLO to every connected neighbour.
-- Any plain text: send a MESSAGE to every connected neighbour.
-- `/peers`: list connected neighbours (the remote socket address is shown;
-  incoming connections show the client's ephemeral source port).
-- `/connect HOST:PORT`: connect to another neighbour while running.
-- `/quit` or Ctrl+C: close connections and stop. End of standard input also stops
-  the application, so keep a terminal open for interactive use.
+## Executar na VM CORE
 
-Use repeated `--peer HOST:PORT` options for multiple initial neighbours. The
-listener binds to `0.0.0.0` by default; `--host` selects a local IPv4 address.
-Connections are direct neighbour links: automatic discovery, forwarding,
-reconnection, routing and video transmission are not implemented yet.
+Abrir `topology/topology.xml` no CORE da VM e iniciar a emulação. Python 3 e o
+projeto devem estar acessíveis no filesystem partilhado dos nós. Confirmar que
+C1 consegue executar `ping 10.0.4.20` antes de arrancar a aplicação.
 
-Control messages are UTF-8 JSON objects terminated by a newline, with `type`
-(`HELLO` or `MESSAGE`), `node_id`, and `text` fields. The maximum encoded message
-size, including its newline, is 65536 bytes. Invalid or oversized incoming
-messages close that connection while the node continues accepting neighbours.
+Na raiz do projeto, no terminal CORE de **Server1**:
 
-See [the topology guide](topology/README.md) for a three-node test and CORE setup.
+```sh
+python3 -m src.main --controller --id Server1
+```
 
-Run the tests:
+Depois, manualmente no terminal CORE de **C1**:
+
+```sh
+python3 -m src.main 10.0.4.20 --id C1
+```
+
+No terminal de **C2**, executar `python3 -m src.main 10.0.4.20 --id C2`.
+Ao atualizar uma sessão que usava processos antigos em R9/R7/R4, reiniciar a
+sessão CORE antes de executar estes comandos para limpar esses processos.
+
+Não é necessário executar comandos nos routers. O identificador deve corresponder
+ao nome no XML; por omissão usa-se o hostname.
+
+O bootstrapper usa TCP **5001**; os vizinhos overlay usam TCP **5000**. A sessão
+CORE é identificada automaticamente se existir uma única sessão com os canais
+dos nós esperados. Se necessário, indicar o diretório real:
+
+```sh
+python3 -m src.main --controller --id Server1 --core-session /tmp/pycore.12345
+```
+
+`--topology CAMINHO` escolhe outro XML físico. O lançamento remoto usa os canais
+`vcmd` dentro da VM CORE: um endereço IP, por si só, não permite iniciar processos
+noutra máquina. Os logs ficam no diretório da sessão, por exemplo `R3-ott.log`.
+
+## Registo, abandono e falhas
+
+- Cada nó renova o registo a cada **5 segundos**. Após **15 segundos** sem
+  renovação, deixa de aparecer em `/members` no servidor.
+- `/quit` e Ctrl+C enviam LEAVE. Uma falha abrupta é tratada pela expiração
+  do registo e pelo fecho da ligação TCP.
+- As renovações voltam a tentar ligar aos vizinhos indisponíveis, incluindo
+  routers que ainda estão a arrancar.
+- Os routers iniciados ficam disponíveis até o servidor terminar, mesmo depois
+  de sair o último cliente. Ainda não existe remoção automática por falta de uso.
+- Server1 é um ponto único de falha: novos registos e a criação de routers
+  dependem dele. Ligações existentes entre outros nós podem continuar abertas.
+- Os caminhos são calculados a partir do XML no arranque; ainda não existe
+  recálculo automático após alterações físicas ou falhas de routers.
+
+## Comandos e protocolo
+
+- `/peers`: listar vizinhos ligados.
+- `/members`: listar clientes ativos e o estado dos routers, apenas no controlador.
+- `/hello`: enviar HELLO aos vizinhos.
+- Texto livre em Server1: multicast MESSAGE para todos os clientes ligados.
+- Texto livre num cliente: enviar MESSAGE apenas para Server1 através do router.
+- `/connect HOST:PORT`: acrescentar um vizinho manualmente.
+- `/quit`: sair.
+
+Exemplo de `/members` com C1 e C2 ligados:
+
+```text
+Server1 (CONTROLLER)
+C1 (OVERLAY CLIENT)
+C2 (OVERLAY CLIENT)
+R3 (OVERLAY ROUTER)
+R4 (UNDERLAY ONLY)
+R7 (UNDERLAY ONLY)
+R9 (UNDERLAY ONLY)
+```
+
+São mostrados todos os routers conhecidos do XML. `UNDERLAY ONLY` identifica
+routers sem aplicação overlay iniciada/registada pelo controlador; não exige
+Python nesses nós e não indica uma verificação da sua disponibilidade IP.
+`OVERLAY NOT REGISTERED` indica que o lançamento foi pedido mas ainda não houve
+registo; `OVERLAY INACTIVE` indica um nó anteriormente registado que saiu ou cuja
+lease expirou. Um router inativo não é confundido com um router apenas underlay.
+
+O multicast é feito pela aplicação sobre TCP: Server1 envia uma cópia por ramo
+overlay e R3 replica-a para C1 e C2. Mensagens de C1 seguem apenas para Server1,
+sem eco para C1 nem entrega a C2. Routers apenas reencaminham; não originam texto.
+`/hello` continua a testar apenas o vizinho direto. O modo manual anterior mantém
+o envio apenas para vizinhos diretos. Streaming de vídeo ainda não está implementado.
+
+Cada MESSAGE encaminhado preserva o identificador da origem e inclui `delivery`
+(`MULTICAST` ou `UPSTREAM`), `message_id` e `ttl`. Os nós descartam duplicados
+recentes e limitam os saltos. A identidade do vizinho TCP é estabelecida pelo
+HELLO e não muda quando passa uma mensagem de outra origem.
+
+As mensagens são objetos JSON UTF-8 terminados por newline, até 65536 bytes.
+Tipos: HELLO, MESSAGE, REGISTER, NEIGHBOURS, LEAVE, ACK e ERROR. JSON é apenas
+a codificação das mensagens TCP; não existe ficheiro JSON da topologia overlay.
+O registo assume um ambiente CORE de confiança, sem autenticação dos IDs.
+
+## Modo manual anterior
+
+Continua disponível para testes locais:
+
+```sh
+python -m src.main --id A
+python -m src.main --id B --port 5002 --peer 127.0.0.1:5000
+```
+
+## Testes
+
+Testes com sockets locais, sem CORE:
 
 ```sh
 python -m unittest discover -s tests
 ```
+
+Para testar dentro da VM CORE, consultar [o guia](topology/README.md).
