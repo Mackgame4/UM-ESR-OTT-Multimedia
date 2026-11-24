@@ -120,6 +120,7 @@ mesmos routers/portas não é suportada nesta fase.
 - `/subscribe` e `/unsubscribe`: pedir ou deixar de receber a stream `default`.
 - `/peers`: vizinhos TCP diretamente ligados; não representa todos os destinatários.
 - `/hello`: testar apenas vizinhos diretos.
+- `/ping`: no servidor, testar os percursos multicast e o retorno de cada cliente.
 - Texto em servidor: multicast para os clientes subscritos e alcançáveis.
 - Texto em cliente: enviar apenas para o servidor pelo caminho instalado.
 - `/quit` ou Ctrl+C: enviar LEAVE e terminar. Falhas abruptas usam a lease.
@@ -131,6 +132,43 @@ sem controlo dinâmico nem reencaminhamento automático:
 python -m src.main --id A
 python -m src.main --id B --port 5002 --peer 127.0.0.1:5000
 ```
+
+## Etapa 3 — teste dos percursos overlay
+
+Com os clientes subscritos e as rotas estabilizadas, executar `/ping` no terminal
+do servidor. O comando envia ROUTE_PING pela árvore multicast instalada, usando
+as mesmas ligações TCP e os mesmos filhos que o encaminhamento de dados.
+
+Cada router acrescenta o seu identificador à lista `path`, regista o percurso
+no log e replica o teste para os seus filhos. Cada ramo acumula uma lista própria.
+O cliente devolve ROUTE_PONG ao pai; os routers reencaminham-no para o servidor
+e acumulam `return_path`, permitindo verificar também o percurso inverso.
+
+Exemplo de resultado (os caminhos e tempos dependem da execução):
+
+```text
+C1: OK | Server1 -> R10 -> R7 -> R4 -> R3 -> C1 | RTT: 18.00 ms | teste=... | v3
+C2: OK | Server1 -> R10 -> R7 -> R4 -> R3 -> C2 | RTT: 20.00 ms | teste=... | v3
+```
+
+O servidor espera até **3 segundos** pelas respostas e apresenta uma linha por
+cliente subscrito. O RTT é medido apenas no servidor com relógio monotónico;
+é diagnóstico e não altera a métrica de escolha de rotas.
+
+- `OK`: o percurso observado corresponde ao caminho escolhido pelo controlador.
+- `TIMEOUT`: não chegou resposta desse cliente dentro do prazo.
+- `UNREACHABLE`: o controlador já não tinha caminho para esse cliente.
+- `STALE`: a árvore mudou durante o teste; repetir após convergência.
+- `PATH_MISMATCH`: chegou uma resposta, mas o percurso difere do caminho esperado.
+- `CANCELLED`: o nó terminou enquanto o teste estava pendente.
+
+As mensagens incluem ID de teste, TTL, versão e identificador do controlador.
+Duplicados e respostas tardias não contam como novas respostas. Uma mensagem
+de outra versão não é encaminhada pela árvore atual. Os logs ROUTE_PING e
+ROUTE_PONG ficam nos logs dos agentes, por exemplo `R3-ott.log` na sessão CORE.
+
+Este teste percorre o overlay de extremo a extremo; não usa as sondas ICMP de
+monitorização e não fica limitado ao vizinho direto como `/hello`.
 
 ## Limites e testes
 
@@ -144,6 +182,7 @@ python -m unittest discover -s tests
 ```
 
 Os testes incluem cortes, recuperação, partições, expiração de routers, ativação
-por pedido e entrega multicast/upstream através de sockets TCP reais. As sondas
+por pedido, entrega multicast/upstream e ROUTE_PING/PONG com percursos de ida e
+volta, timeouts e mudanças de versão através de sockets TCP reais. As sondas
 são simuladas nestes testes. Para validar cortes físicos e sondas reais na VM,
 consultar [o guia CORE](topology/README.md).

@@ -62,6 +62,22 @@ até a rede subjacente recuperar. Durante a convergência pode haver perda de da
   que este iniciou tiver terminado.
 - Não existe bootstrapper num router: o controlador é sempre o servidor escolhido.
 
+## Etapa 3 — verificar os percursos
+
+1. Iniciar Server1, C1 e C2 como indicado acima e esperar por rotas ACTIVE.
+2. Executar `/ping` em Server1. Deve surgir um resultado OK por cliente, com
+   caminho acumulado, RTT, ID do teste e versão da árvore. O prazo é de 3 segundos.
+3. Comparar os caminhos com `/routes`. Inspecionar `R3-ott.log` e os logs dos
+   outros routers do percurso: devem mostrar ROUTE_PING na ida e ROUTE_PONG
+   no retorno, com os mesmos identificadores de teste.
+4. Cortar uma ligação com alternativa, esperar pelo recálculo e repetir `/ping`.
+   O novo percurso observado deve coincidir com o novo caminho de `/routes`.
+5. Se a rota mudar durante o teste, o resultado é STALE. Repetir depois de
+   estabilizar. Sem caminho, surge UNREACHABLE; sem resposta no prazo, TIMEOUT.
+
+O RTT não muda a métrica BFS. `/ping` testa o overlay completo; `/hello` testa
+apenas vizinhos e o `ping` Linux continua a ser usado nas sondas de adjacência.
+
 ## Teste automatizado opcional
 
 No terminal do host Linux da VM, fora dos terminais dos nós:
@@ -72,7 +88,7 @@ sudo python3 tests/core_smoke.py
 
 Este teste cria namespaces CORE isolados com todos os dispositivos e ligações
 iniciais do XML. Usa rotas IP estáticas, testa agentes, pedidos de rota, multicast,
-uplink isolado e LEAVE. Não testa cortes físicos nem convergência OSPF; esses
+uplink isolado, `/ping` para C1/C2 e LEAVE. Não testa cortes físicos nem convergência OSPF; esses
 casos são verificados pelo procedimento manual acima. Os testes de recálculo e
 recuperação automáticos com sondas simuladas estão em `tests/test_live_routes.py`.
 

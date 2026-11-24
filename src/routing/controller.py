@@ -135,3 +135,8 @@ class LiveRoutes:
             return [dict(client=name, stream="default", state="ACTIVE" if path else "UNREACHABLE",
                          path=path or [], hops=len(path) - 1 if path else None, epoch=self.version)
                     for name, path in self.paths.items()]
+
+    def diagnostic_plan(self):
+        with self._lock:
+            routing = self.routing(self.server_id)
+            return {name: list(path) if path else [] for name, path in self.paths.items()}, routing

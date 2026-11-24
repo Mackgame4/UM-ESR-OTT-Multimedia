@@ -140,6 +140,12 @@ class LiveDeliveryTests(unittest.TestCase):
             elif text == "restored":
                 down.clear()
             settled(parent)
+            paths, routing = routes.diagnostic_plan()
+            results = nodes["Server1"].diagnostics.ping(paths, timeout=2, routing=routing)
+            self.assertTrue(all(result["status"] == "OK" for result in results))
+            for result in results:
+                self.assertEqual(result["path"], paths[result["client"]])
+                self.assertEqual(result["path"][1], parent)
             nodes["Server1"].broadcast(text, "MESSAGE")
             for client in ("C1", "C2"):
                 message = inboxes[client].get(timeout=3)

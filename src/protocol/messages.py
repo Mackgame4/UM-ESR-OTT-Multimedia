@@ -28,7 +28,7 @@ def validate_message(message):
     if not isinstance(message, dict):
         raise ValueError("A mensagem deve ser um objeto JSON")
     if message.get("type") not in ("HELLO", "MESSAGE", "REGISTER", "NEIGHBOURS", "LEAVE", "ACK", "ERROR",
-                                   "ROUTE_REQUEST", "ROUTE_WITHDRAW"):
+                                   "ROUTE_REQUEST", "ROUTE_WITHDRAW", "ROUTE_PING", "ROUTE_PONG"):
         raise ValueError("Tipo de mensagem desconhecido")
     if not isinstance(message.get("node_id"), str) or not message["node_id"].strip():
         raise ValueError("node_id deve ser uma string não vazia")
@@ -43,6 +43,18 @@ def validate_message(message):
                 not isinstance(message.get("message_id"), str) or not message["message_id"] or
                 type(message.get("ttl")) is not int or not 0 <= message["ttl"] <= 64):
             raise ValueError("Metadados de encaminhamento inválidos")
+    if message["type"] in ("ROUTE_PING", "ROUTE_PONG"):
+        if (not isinstance(message.get("test_id"), str) or not message["test_id"] or
+                type(message.get("ttl")) is not int or not 0 <= message["ttl"] <= 64 or
+                type(message.get("epoch")) is not int or message["epoch"] < 0 or
+                not isinstance(message.get("controller_id"), str) or not message["controller_id"]):
+            raise ValueError("Metadados de teste de percurso inválidos")
+        for field in (("path", "return_path") if message["type"] == "ROUTE_PONG" else ("path",)):
+            path = message.get(field)
+            if (not isinstance(path, list) or not 1 <= len(path) <= 65 or
+                    any(not isinstance(node, str) or not node.strip() for node in path) or
+                    len(set(path)) != len(path)):
+                raise ValueError("Percurso de teste inválido")
     if message["type"] == "NEIGHBOURS":
         if "routing" in message:
             routing = message["routing"]

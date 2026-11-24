@@ -91,7 +91,7 @@ def run(argv=None):
         if args.headless:
             stopped.wait()
             return 0
-        print("Comandos: /hello, /peers, /members, /routes, /subscribe, /unsubscribe, /connect HOST:PORT, /quit. "
+        print("Comandos: /ping, /hello, /peers, /members, /routes, /subscribe, /unsubscribe, /connect HOST:PORT, /quit. "
               "Texto: servidor envia a todos os clientes; cliente envia ao servidor.", flush=True)
         while not stopped.is_set():
             try:
@@ -100,7 +100,31 @@ def run(argv=None):
                 break
             if command == "/quit":
                 break
-            if command == "/routes":
+            if command == "/ping":
+                if controller and controller.routes:
+                    paths, routing = controller.routes.diagnostic_plan()
+                    node.configure_routing(**routing)
+                    if not paths:
+                        print("Sem clientes subscritos para testar.", flush=True)
+                    else:
+                        print("A testar os percursos overlay (timeout: 3 s)...", flush=True)
+                        try:
+                            for result in node.diagnostics.ping(paths, routing=routing):
+                                actual = " -> ".join(result["path"])
+                                expected = " -> ".join(result["expected_path"])
+                                detail = actual or ("esperado: " + expected if expected else "sem percurso disponível")
+                                timing = (" | RTT: {:.2f} ms".format(result["rtt_ms"])
+                                          if result["rtt_ms"] is not None and result["status"] == "OK" else "")
+                                print("{}: {} | {}{} | teste={} | v{}".format(
+                                    result["client"], result["status"], detail, timing,
+                                    result["test_id"], result["epoch"]), flush=True)
+                                if result["status"] == "STALE":
+                                    print("A rota mudou durante o teste; repetir /ping após convergência.", flush=True)
+                        except ValueError as exc:
+                            print(str(exc), flush=True)
+                else:
+                    print("/ping disponível apenas no servidor/bootstrapper.", flush=True)
+            elif command == "/routes":
                 if controller and controller.routes:
                     rows = controller.routes.table()
                     for row in rows:

@@ -152,6 +152,9 @@ def main():
         deliver(server, (client_log, second_log), "CORE multicast test", "Server1")
         deliver(client, (server_log,), "CORE bootstrap test", "C1")
         assert "CORE bootstrap test" not in contents(second_log), "Client uplink leaked to C2"
+        server.stdin.write("/ping\n")
+        server.stdin.flush()
+        wait_for(lambda: "C1: OK |" in contents(server_log) and "C2: OK |" in contents(server_log))
         client.stdin.write("/quit\n")
         client.stdin.flush()
         client.wait(timeout=10)
@@ -164,7 +167,7 @@ def main():
         server.wait(timeout=15)
         if client.returncode or second.returncode or server.returncode:
             raise RuntimeError("Application exited unsuccessfully")
-        print("PASS: full XML underlay; control agents; on-demand routes; multicast C1/C2; isolated uplink; LEAVE")
+        print("PASS: full XML underlay; control agents; on-demand routes; multicast C1/C2; isolated uplink; ROUTE_PING/PONG; LEAVE")
     finally:
         print("CORE test logs:", session)
         for process in processes:

@@ -8,6 +8,7 @@ from collections import OrderedDict
 
 from src.config import CONNECT_TIMEOUT, DEFAULT_HOST, DEFAULT_PORT
 from src.network.tcp import TCPConnection
+from src.routing.diagnostics import RouteDiagnostics
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class OverlayNode:
         self._lock = threading.RLock()
         self._routing = None
         self._seen = OrderedDict()
+        self.diagnostics = RouteDiagnostics(self)
 
     def configure_routing(self, role, server_id, parent_id, children, epoch=None, controller_id=None):
         if role not in ("server", "router", "client"):
@@ -43,6 +45,7 @@ class OverlayNode:
                         and peer.node_id is not None and peer.node_id not in set(children) | {parent_id}]
         for peer in obsolete:
             peer.close()
+        self.diagnostics.route_changed(self._routing)
 
     def _remember(self, message_id):
         with self._lock:
@@ -57,14 +60,10 @@ class OverlayNode:
         with self._lock:
             peers = [peer for peer in self._connections if peer.node_id in peer_ids]
         count = 0
-        fields = {key: message[key] for key in ("delivery", "message_id", "ttl")}
-        if "epoch" in message:
-            fields["epoch"] = message["epoch"]
-        if "controller_id" in message:
-            fields["controller_id"] = message["controller_id"]
+        fields = {key: value for key, value in message.items() if key not in ("type", "node_id", "text")}
         for peer in peers:
             try:
-                peer.send("MESSAGE", message["node_id"], message["text"], **fields)
+                peer.send(message.get("type", "MESSAGE"), message["node_id"], message["text"], **fields)
                 count += 1
             except OSError:
                 peer.close()
@@ -180,6 +179,9 @@ class OverlayNode:
                 if message["type"] == "MESSAGE" and self._routing is not None:
                     self._route_received(connection, message)
                     continue
+                if message["type"] in ("ROUTE_PING", "ROUTE_PONG"):
+                    self.diagnostics.receive(connection, message)
+                    continue
                 LOGGER.info("[%s] RX %s de %s: %s", self.node_id,
                             message["type"], message["node_id"], message["text"])
                 if self.on_message is not None:
@@ -224,6 +226,7 @@ class OverlayNode:
         return sent
 
     def stop(self):
+        self.diagnostics.cancel()
         with self._lock:
             self._running = False
             if self._listener is not None:
