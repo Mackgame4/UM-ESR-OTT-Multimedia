@@ -6,6 +6,7 @@ import socket
 import signal
 import threading
 import shutil
+import math
 
 from src.config import DEFAULT_HOST, DEFAULT_PORT
 from src.node import OverlayNode
@@ -13,6 +14,8 @@ from src.overlay.bootstrap import BOOTSTRAP_PORT, BootstrapClient, BootstrapCont
 from src.overlay.core import CoreLauncher
 from src.overlay.topology import load_topology
 from src.routing.controller import LiveRoutes
+from src.streaming.source import VideoSource
+from src.streaming.transport import VideoTransport
 
 
 def port_number(value):
@@ -36,6 +39,16 @@ def bootstrap_address(value):
     return peer_address(value) if ":" in value else (value, BOOTSTRAP_PORT)
 
 
+def frame_rate(value):
+    try:
+        fps = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("FPS inválido") from exc
+    if not math.isfinite(fps) or not 0 < fps <= 120:
+        raise argparse.ArgumentTypeError("FPS deve estar entre 0 e 120")
+    return fps
+
+
 def run(argv=None):
     parser = argparse.ArgumentParser(description="OTT: nó overlay com controlo TCP")
     parser.add_argument("bootstrapper", nargs="?", type=bootstrap_address,
@@ -45,6 +58,12 @@ def run(argv=None):
     parser.add_argument("--bootstrap-port", type=port_number, default=BOOTSTRAP_PORT)
     parser.add_argument("--core-session", help="Diretório /tmp/pycore.ID da sessão CORE")
     parser.add_argument("--headless", action="store_true", help="Executar sem stdin")
+    parser.add_argument("--video", help="Servidor: ficheiro movie.Mjpeg do exemplo")
+    parser.add_argument("--fps", type=frame_rate, default=20, help="Frames por segundo (20 por omissão)")
+    parser.add_argument("--no-loop", action="store_true", help="Não repetir o vídeo no fim")
+    parser.add_argument("--watch", action="store_true", help="Cliente: abrir janela de vídeo live")
+    parser.add_argument("--udp-port", type=port_number, default=6000, help="Porta UDP local para vídeo")
+    parser.add_argument("--loss-log", help="Ficheiro de perdas (por omissão logs/ID-video.log)")
     parser.add_argument("--id", default=socket.gethostname(), help="Identificador do nó")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Endereço IPv4 de escuta")
     parser.add_argument("--port", type=port_number, default=DEFAULT_PORT,
@@ -60,15 +79,26 @@ def run(argv=None):
         parser.error("Use bootstrapper ou --peer")
     if args.core_session and not args.controller:
         parser.error("--core-session requer --controller")
+    if args.video and not args.controller:
+        parser.error("--video requer --controller")
+    if args.watch and (not args.bootstrapper or args.headless):
+        parser.error("--watch requer um cliente interativo com bootstrapper")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     node = OverlayNode(args.id, args.host, args.port)
     controller = client = launcher = None
+    source = player = None
     stopped = threading.Event()
     previous_handler = signal.signal(signal.SIGTERM, lambda *_: stopped.set())
     try:
         if (args.controller or args.bootstrapper) and shutil.which("ping") is None:
             raise ValueError("O controlo dinâmico requer ping (iputils) na VM Linux")
         node.start()
+        if args.controller or args.bootstrapper:
+            node.media = VideoTransport(node, args.host, args.udp_port, loss_log=args.loss_log)
+            node.media.start()
+        if args.watch:
+            from src.streaming.player import VideoPlayer
+            player = VideoPlayer(node.media, stopped)
         if args.controller:
             config = load_topology(args.topology, args.id, args.port)
             entry = config["nodes"].get(args.id)
@@ -83,11 +113,19 @@ def run(argv=None):
         elif args.bootstrapper:
             client = BootstrapClient(node, args.bootstrapper)
             client.start()
+            if args.watch and node._routing["role"] != "client":
+                raise ValueError("--watch só é suportado nos clientes")
+        if args.video:
+            source = VideoSource(node.media, args.video, args.fps, loop=not args.no_loop)
+            source.start()
         for host, port in args.peer:
             try:
                 node.connect(host, port)
             except OSError as exc:
                 print("Não foi possível ligar a {}:{}: {}".format(host, port, exc), flush=True)
+        if player:
+            player.run()
+            return 0
         if args.headless:
             stopped.wait()
             return 0
@@ -182,6 +220,10 @@ def run(argv=None):
         logging.error("Erro: %s", exc)
         return 1
     finally:
+        if player:
+            player.close()
+        if source:
+            source.stop()
         if client:
             client.stop()
         if controller:

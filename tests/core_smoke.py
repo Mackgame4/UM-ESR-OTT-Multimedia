@@ -57,7 +57,7 @@ def main():
         logs.append(log)
         process = subprocess.Popen(
             ["vcmd", "-c", str(session / name), "--", sys.executable,
-             "-m", "src.main", *args], cwd=ROOT, stdin=subprocess.PIPE,
+             "-m", "src.main", *args, "--loss-log", str(session / (name + "-video.log"))], cwd=ROOT, stdin=subprocess.PIPE,
             stdout=log, stderr=subprocess.STDOUT, text=True)
         processes.append(process)
         return process, log
@@ -127,8 +127,10 @@ def main():
                 cmd(source, "ip", "route", "add", subnet, "via", ports[next_device, back])
         c1_id = next(n for n, name in devices.items() if name == "C1")
         cmd(c1_id, "ping", "-c", "1", "-W", "3", "10.0.4.20")
+        movie = ROOT / "videos/movie.Mjpeg"
+        video_args = ["--video", str(movie)] if movie.exists() else []
         server, server_log = app("Server1", "--id", "Server1", "--controller",
-                                 "--core-session", str(session))
+                                 "--core-session", str(session), *video_args)
         wait_for(lambda: "Bootstrapper TCP" in contents(server_log))
         wait_for(lambda: (session / "R3-ott.log").exists())
         client, client_log = app("C1", "10.0.4.20", "--id", "C1")
@@ -155,6 +157,9 @@ def main():
         server.stdin.write("/ping\n")
         server.stdin.flush()
         wait_for(lambda: "C1: OK |" in contents(server_log) and "C2: OK |" in contents(server_log))
+        if movie.exists():
+            for name in ("C1", "C2"):
+                wait_for(lambda name=name: "VIDEO_START" in (session / (name + "-video.log")).read_text())
         client.stdin.write("/quit\n")
         client.stdin.flush()
         client.wait(timeout=10)

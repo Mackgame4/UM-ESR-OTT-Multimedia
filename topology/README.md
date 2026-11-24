@@ -78,6 +78,46 @@ até a rede subjacente recuperar. Durante a convergência pode haver perda de da
 O RTT não muda a métrica BFS. `/ping` testa o overlay completo; `/hello` testa
 apenas vizinhos e o `ping` Linux continua a ser usado nas sondas de adjacência.
 
+## Etapa 4 — vídeo multicast UDP
+
+Copiar `videos/movie.Mjpeg` para a VM, instalar Pillow (`pip install -r requirements.txt`)
+no ambiente Python escolhido e instalar o suporte Tk da distribuição. O terminal
+CORE do cliente deve ter acesso ao display gráfico da VM. Reiniciar a sessão
+para limpar os agentes de versões anteriores.
+
+Em Server1, na raiz do projeto:
+
+```sh
+python3 -m src.main --controller --id Server1 --video videos/movie.Mjpeg
+```
+
+Nos terminais de C1 e C2, respetivamente:
+
+```sh
+python3 -m src.main 10.0.4.20 --id C1 --watch
+python3 -m src.main 10.0.4.20 --id C2 --watch
+```
+
+Se as dependências estiverem numa venv, substituir `python3` pelo seu executável,
+por exemplo `.venv/bin/python`. Sem display, omitir `--watch` para testar a receção
+sem janela. O vídeo usa UDP 6000; verificar que essa porta está disponível nos nós.
+
+O servidor lê o vídeo uma vez e partilha a mesma emissão por todos os clientes.
+Os routers encaminham fragmentos por ramo, replicando apenas nas bifurcações.
+`/routes` mostra o percurso efetivamente instalado, que pode incluir routers
+intermédios antes de R3. O vídeo é repetido a 20 FPS por omissão.
+
+Para testar perdas, aplicar perda/atraso a uma ligação no CORE em execução:
+o cliente deve continuar nos frames completos mais recentes. Inspecionar
+`logs/C1-video.log` e `logs/C2-video.log`: as entradas FRAME_LOSS identificam
+frames incompletos e intervalos de sequência perdidos. Não há retransmissões.
+O primeiro frame reconstruído gera VIDEO_START no mesmo ficheiro.
+
+Para testar recuperação, cortar um ramo com alternativa, esperar pela mudança
+de `/routes` e verificar que o vídeo retoma sem reproduzir o intervalo perdido.
+Os relatórios de perdas não aparecem repetidamente no terminal, apenas no log.
+Fechar a janela termina o cliente e remove a sua subscrição.
+
 ## Teste automatizado opcional
 
 No terminal do host Linux da VM, fora dos terminais dos nós:
@@ -88,7 +128,9 @@ sudo python3 tests/core_smoke.py
 
 Este teste cria namespaces CORE isolados com todos os dispositivos e ligações
 iniciais do XML. Usa rotas IP estáticas, testa agentes, pedidos de rota, multicast,
-uplink isolado, `/ping` para C1/C2 e LEAVE. Não testa cortes físicos nem convergência OSPF; esses
+uplink isolado, `/ping` para C1/C2 e LEAVE. Se `videos/movie.Mjpeg` estiver presente,
+também verifica a reconstrução de vídeo UDP nos dois clientes sem janela.
+Não testa cortes físicos nem convergência OSPF; esses
 casos são verificados pelo procedimento manual acima. Os testes de recálculo e
 recuperação automáticos com sondas simuladas estão em `tests/test_live_routes.py`.
 

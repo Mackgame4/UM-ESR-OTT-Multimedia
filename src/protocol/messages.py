@@ -56,6 +56,17 @@ def validate_message(message):
                     len(set(path)) != len(path)):
                 raise ValueError("Percurso de teste inválido")
     if message["type"] == "NEIGHBOURS":
+        if "media" in message:
+            media = message["media"]
+            if (not isinstance(media, dict) or type(media.get("epoch")) is not int or media["epoch"] < 0 or
+                    not isinstance(media.get("controller_id"), str) or not media["controller_id"] or
+                    not isinstance(media.get("children"), list) or "parent" not in media):
+                raise ValueError("Plano UDP inválido")
+            endpoints = media["children"] + ([media["parent"]] if media["parent"] is not None else [])
+            for endpoint in endpoints:
+                if (not isinstance(endpoint, dict) or not isinstance(endpoint.get("host"), str) or not endpoint["host"] or
+                        type(endpoint.get("port")) is not int or not 1 <= endpoint["port"] <= 65535):
+                    raise ValueError("Destino UDP inválido")
         if "routing" in message:
             routing = message["routing"]
             if (not isinstance(routing, dict) or

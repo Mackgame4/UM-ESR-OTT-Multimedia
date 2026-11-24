@@ -49,7 +49,8 @@ class CoreLauncher:
                        "-c", "import os,sys; os.chdir(sys.argv.pop(1)); "
                        "sys.path.insert(0, os.getcwd()); from src.main import main; "
                        "raise SystemExit(main())", root, self.bootstrapper, "--id", name,
-                       "--port", str(entry["port"]), "--headless"]
+                       "--port", str(entry["port"]), "--headless",
+                       "--loss-log", str(self.session / (name + "-video.log"))]
             self.processes[name] = subprocess.Popen(
                 command, cwd=Path(__file__).resolve().parents[2],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)

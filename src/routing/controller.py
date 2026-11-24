@@ -16,6 +16,7 @@ class LiveRoutes:
         self._lock = threading.RLock()
         self._seen = {}
         self._reports = {}
+        self._media_ports = {}
         self._subscribers = set()
         self.parents = {}
         self.paths = {}
@@ -31,14 +32,17 @@ class LiveRoutes:
                     result.append(dict(id=link["id"], interface=local["interface"], host=remote["host"]))
         return result
 
-    def register(self, name, reports):
+    def register(self, name, reports, udp_port=None):
         allowed = {target["id"] for target in self.targets(name)}
         if not isinstance(reports, dict) or any(key not in allowed or type(value) is not bool
                                                 for key, value in reports.items()):
             raise ValueError("Relatório de ligações inválido")
+        if udp_port is not None and (type(udp_port) is not int or not 1 <= udp_port <= 65535):
+            raise ValueError("Porta UDP inválida")
         with self._lock:
             self._seen[name] = self.clock()
             self._reports[name] = dict(reports)
+            self._media_ports[name] = udp_port
             self.recompute()
 
     def subscribe(self, name, enabled=True):
@@ -55,6 +59,7 @@ class LiveRoutes:
         with self._lock:
             self._seen.pop(name, None)
             self._reports.pop(name, None)
+            self._media_ports.pop(name, None)
             self._subscribers.discard(name)
             self.recompute()
 
@@ -91,7 +96,8 @@ class LiveRoutes:
                     for parent, child in zip(path, path[1:]):
                         parents[child] = parent
             signature = (tuple(sorted(parents.items())),
-                         tuple((name, tuple(path) if path else None) for name, path in selected.items()))
+                         tuple((name, tuple(path) if path else None) for name, path in selected.items()),
+                         tuple((name, self._media_ports.get(name)) for name in sorted(set(parents) | set(parents.values()))))
             if signature != self._signature:
                 self.version += 1
                 self._signature = signature
@@ -127,7 +133,25 @@ class LiveRoutes:
         with self._lock:
             routing = self.routing(name)
             return dict(routing=routing, neighbours=self.neighbour(name),
-                        probe_targets=self.targets(name), dynamic=True)
+                        probe_targets=self.targets(name), dynamic=True, media=self._media_plan(name))
+
+    def _media_plan(self, name):
+        def endpoint(local, remote):
+            port = self._media_ports.get(remote)
+            if port is None:
+                return None
+            for link in self.config["links"]:
+                for a, b in ((link["a"], link["b"]), (link["b"], link["a"])):
+                    if (a["node"] == local and b["node"] == remote and
+                            self._reports.get(local, {}).get(link["id"], False) and
+                            self._reports.get(remote, {}).get(link["id"], False)):
+                        return dict(host=b["host"], port=port)
+            return None
+
+        parent = endpoint(name, self.parents[name]) if name in self.parents else None
+        children = [endpoint(name, child) for child, p in self.parents.items() if p == name]
+        return dict(epoch=self.version, controller_id=self.controller_id, parent=parent,
+                    children=[child for child in children if child is not None])
 
     def table(self):
         with self._lock:

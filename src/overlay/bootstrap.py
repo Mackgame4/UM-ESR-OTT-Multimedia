@@ -83,7 +83,7 @@ class BootstrapController:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         if self.routes:
-            self.routes.register(self.node_id, {})
+            self.routes.register(self.node_id, {}, udp_port=getattr(getattr(self.node, "media", None), "port", None))
             self._apply_root()
             self.worker = threading.Thread(target=self._maintain, daemon=True)
             self.worker.start()
@@ -179,7 +179,10 @@ class BootstrapController:
 
     def _apply_root(self):
         if self.node:
-            self.node.configure_routing(**self.routes.routing(self.node_id))
+            state = self.routes.snapshot(self.node_id)
+            self.node.configure_routing(**state["routing"])
+            if self.node.media:
+                self.node.media.configure(state["media"])
 
     def _maintain(self):
         while not self._stop.is_set():
@@ -192,7 +195,8 @@ class BootstrapController:
                             LOGGER.warning("Agente %s indisponível: %s", name, exc)
             try:
                 reports = self.probe(self.routes.targets(self.node_id))
-                self.routes.register(self.node_id, reports)
+                self.routes.register(self.node_id, reports,
+                                     udp_port=getattr(getattr(self.node, "media", None), "port", None))
                 self._apply_root()
             except OSError as exc:
                 LOGGER.error("Monitorização indisponível: %s", exc)
@@ -203,7 +207,7 @@ class BootstrapController:
         name, kind = message["node_id"], message["type"]
         if kind == "REGISTER":
             first = name not in self.routes.active()
-            self.routes.register(name, message.get("links", {}))
+            self.routes.register(name, message.get("links", {}), udp_port=message.get("udp_port"))
             if first:
                 LOGGER.info("[%s] REGISTER %s", self.node_id, name)
         elif kind in ("ROUTE_REQUEST", "ROUTE_WITHDRAW"):
@@ -243,7 +247,8 @@ class BootstrapClient:
 
     def refresh(self):
         with self._refresh_lock:
-            response = request(self.address, self.node.node_id, links=self.probe(self.targets))
+            response = request(self.address, self.node.node_id, links=self.probe(self.targets),
+                               udp_port=getattr(self.node.media, "port", None))
             first = not self.dynamic and response.get("dynamic", False)
             self.dynamic = response.get("dynamic", False)
             self.targets = response.get("probe_targets", [])
@@ -256,6 +261,8 @@ class BootstrapClient:
     def _install(self, response):
         if "routing" in response:
             self.node.configure_routing(**response["routing"])
+        if self.node.media and "media" in response:
+            self.node.media.configure(response["media"])
         for peer in response["neighbours"]:
             try:
                 self.node.ensure_neighbour(peer["node_id"], peer["host"], peer["port"])

@@ -29,6 +29,7 @@ class OverlayNode:
         self._routing = None
         self._seen = OrderedDict()
         self.diagnostics = RouteDiagnostics(self)
+        self.media = None
 
     def configure_routing(self, role, server_id, parent_id, children, epoch=None, controller_id=None):
         if role not in ("server", "router", "client"):
@@ -227,6 +228,8 @@ class OverlayNode:
 
     def stop(self):
         self.diagnostics.cancel()
+        if self.media:
+            self.media.stop()
         with self._lock:
             self._running = False
             if self._listener is not None:

@@ -1,9 +1,10 @@
 ﻿# esr-ott
 
 Projeto ESR TP2: rede overlay multicast para distribuição multimédia no CORE.
-O plano de controlo e a demonstração de mensagens usam TCP. O vídeo por UDP
-continua por implementar. A aplicação Python usa apenas a biblioteca standard;
-a monitorização na VM Linux requer `ping` (iputils).
+O plano de controlo e a demonstração de mensagens usam TCP. O vídeo MJPEG usa
+UDP e a mesma árvore multicast. O cliente gráfico requer Pillow e Tkinter;
+o servidor, os routers e o cliente sem janela usam a biblioteca standard.
+A monitorização na VM Linux requer `ping` (iputils).
 
 ## Estratégia 2 — servidor como bootstrapper e controlador
 
@@ -172,8 +173,8 @@ monitorização e não fica limitado ao vizinho direto como `/hello`.
 
 ## Limites e testes
 
-A stream `default` representa atualmente o canal de demonstração MESSAGE, não
-uma transmissão de vídeo. A rede CORE é considerada de confiança, sem autenticação
+A stream `default` suporta vídeo MJPEG quando o servidor arranca com `--video`,
+além da demonstração MESSAGE. A rede CORE é considerada de confiança, sem autenticação
 dos IDs/relatórios. Uma partição sem caminho disponível aparece como UNREACHABLE;
 o controlador não consegue criar conectividade que a rede física não oferece.
 
@@ -186,3 +187,94 @@ por pedido, entrega multicast/upstream e ROUTE_PING/PONG com percursos de ida e
 volta, timeouts e mudanças de versão através de sockets TCP reais. As sondas
 são simuladas nestes testes. Para validar cortes físicos e sondas reais na VM,
 consultar [o guia CORE](topology/README.md).
+
+## Etapa 4 — vídeo multicast UDP ao vivo
+
+A implementação adapta `VideoStream.py`, `RtpPacket.py`, `Servidor.py` e
+`ClienteGUI.py` do material Python fornecido. Mantém o formato do ficheiro:
+cinco bytes ASCII com o comprimento, seguidos do JPEG. Substitui a transmissão
+unicast fixa do exemplo por encaminhamento nos ramos da árvore overlay.
+
+Existe **uma única leitura e um único relógio de emissão** no servidor. Cada
+fragmento é enviado uma vez por ramo; na bifurcação R3 replica para C1 e C2.
+Se o caminho calculado tiver routers antes de R3, esses routers também encaminham
+a mesma cópia pelo ramo partilhado. Não é criada uma fonte por cliente.
+
+### Arranque na VM
+
+O vídeo de teste foi colocado em `videos/movie.Mjpeg` a partir do material
+fornecido. Garantir que também está presente na VM. Na VM, instalar o suporte Tk da
+distribuição (`python3-tk` em Ubuntu/Debian) e criar um ambiente Python:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Reiniciar a sessão CORE para carregar a versão atual em todos os agentes. Na
+raiz do projeto, em Server1:
+
+```sh
+.venv/bin/python -m src.main --controller --id Server1 --video videos/movie.Mjpeg
+```
+
+Nos terminais CORE dos clientes (com acesso ao display gráfico da VM):
+
+```sh
+# C1
+.venv/bin/python -m src.main 10.0.4.20 --id C1 --watch
+# C2
+.venv/bin/python -m src.main 10.0.4.20 --id C2 --watch
+```
+
+Cada cliente abre uma janela e apresenta os frames completos mais recentes.
+Fechar a janela termina o cliente e envia LEAVE. Sem `--watch`, o cliente recebe
+e contabiliza vídeo sem janela e mantém os comandos no terminal. Os routers não
+precisam de Pillow, display ou ficheiro de vídeo.
+
+O vídeo usa **UDP 6000** por omissão (`--udp-port` permite alterar a porta local).
+Os nós anunciam a porta pelo canal TCP; o servidor fornece os destinos UDP de
+cada ramo. As portas TCP 5000/5001 mantêm as suas funções. O formato transmite
+a stream `default`; não há uma segunda sessão RTSP paralela ao controlo existente.
+
+Por omissão, a fonte envia a **20 FPS** e repete o vídeo, mantendo os números de
+frame crescentes. `--fps 25` altera o ritmo e `--no-loop` termina a emissão no
+fim do ficheiro. Sem ramos ativos, a fonte pausa a leitura e não envia dados;
+um cliente que entra durante a emissão acompanha o ponto atual da mesma fonte.
+
+### Perdas sem bloquear a reprodução
+
+- Datagramas até **1200 bytes**, com fragmentação na aplicação e sequências
+  RTP de 16 bits. O prefixo privado transporta sessão, controlador, versão da
+  rota, número de frame de 64 bits, índice/total de fragmentos e TTL.
+- O cabeçalho segue a base RTP v2 do exemplo, com payload type dinâmico 96.
+  A fragmentação é privada: não é o formato RTP/JPEG RFC 2435 e não é diretamente
+  compatível com o leitor original ou leitores RTP genéricos.
+- Routers validam e encaminham fragmentos sem descodificar ou reconstruir JPEGs.
+  Apenas os clientes fazem a reconstrução, limitada a um frame em curso.
+- Assim que chega um frame mais recente, o anterior incompleto é descartado.
+  Não há NACK, retransmissão nem espera por frames em falta.
+- Um prazo de 100 ms limpa fragmentos incompletos mesmo se não chegarem novos
+  pacotes; não atrasa a apresentação de um frame completo mais recente.
+- A janela usa uma fila de tamanho 1 e descodifica em memória na thread gráfica,
+  sem ficheiros JPEG temporários nem acumulação de frames antigos.
+- As perdas são registadas apenas em ficheiro: `logs/C1-video.log`,
+  `logs/C2-video.log`, etc. `--loss-log CAMINHO` escolhe outro destino.
+
+Exemplo de perda de fragmentos e de frames totalmente ausentes:
+
+```text
+FRAME_LOSS reason=newer_frame frames=14..14 fragments=5/6
+FRAME_LOSS reason=sequence_gap frames=18..20 fragments=0/0
+```
+
+Um intervalo perdido por completo é identificado quando chega a sequência
+seguinte; não é possível contar frames que nunca foram observados enquanto
+a ligação permanece totalmente interrompida. O primeiro frame de um cliente
+que acaba de entrar define a sua referência, sem contar o passado como perda.
+
+Mudanças de árvore descartam pacotes da versão anterior. Após convergência, a
+reprodução retoma nos frames atuais, sem recuperar o vídeo perdido. Uma perda
+pode deixar temporariamente a última imagem visível, mas não bloqueia a receção
+nem atrasa os frames seguintes. `/ping` continua disponível no servidor para
+verificar os percursos de controlo instalados.

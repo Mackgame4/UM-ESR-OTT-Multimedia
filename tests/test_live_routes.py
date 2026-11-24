@@ -4,10 +4,15 @@ import queue
 import threading
 import time
 import unittest
+import tempfile
+from pathlib import Path
+import uuid
 
 from src.node import OverlayNode
 from src.overlay.bootstrap import BootstrapClient, BootstrapController
 from src.routing.controller import LiveRoutes
+from src.streaming.transport import VideoTransport
+from src.streaming.packet import packetize
 
 
 def topology(ports=None):
@@ -94,7 +99,9 @@ class LiveRouteTests(unittest.TestCase):
 
 class LiveDeliveryTests(unittest.TestCase):
     def test_multicast_and_upstream_recover_after_link_cut_and_restore(self):
-        nodes, inboxes = {}, {}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        nodes, inboxes, videos = {}, {}, {}
         for name in topology()["nodes"]:
             inbox = queue.Queue()
             node = OverlayNode(name, "127.0.0.1", 0,
@@ -102,7 +109,13 @@ class LiveDeliveryTests(unittest.TestCase):
                                if msg["type"] == "MESSAGE" else None)
             node.start()
             self.addCleanup(node.stop)
+            video = queue.Queue()
+            node.media = VideoTransport(node, "127.0.0.1", 0,
+                                        Path(temporary.name) / (name + ".log"),
+                                        on_frame=lambda frame, jpeg, q=video: q.put((frame, jpeg)))
+            node.media.start()
             nodes[name], inboxes[name] = node, inbox
+            videos[name] = video
         config = topology({name: node.port for name, node in nodes.items()})
         routes = LiveRoutes(config, "Server1")
         down = threading.Event()
@@ -127,6 +140,7 @@ class LiveDeliveryTests(unittest.TestCase):
                 used = {"Server1", parent, "R3", "C1", "C2"}
                 if (len(rows) == 2 and all(row["path"] and row["path"][1] == parent for row in rows)
                         and all(nodes[name]._routing and nodes[name]._routing["epoch"] == routes.version for name in used)
+                        and all(nodes[name].media.snapshot() is not None for name in used)
                         and all({peer for peer, _ in nodes[child].peers()} >= {p}
                                 and {peer for peer, _ in nodes[p].peers()} >= {child}
                                 for child, p in routes.parents.items())):
@@ -134,7 +148,8 @@ class LiveDeliveryTests(unittest.TestCase):
                 time.sleep(0.02)
             self.fail("Dynamic tree did not converge")
 
-        for parent, text in (("R1", "before cut"), ("R2", "after cut"), ("R1", "restored")):
+        session = uuid.uuid4().bytes
+        for frame, (parent, text) in enumerate((("R1", "before cut"), ("R2", "after cut"), ("R1", "restored")), 1):
             if text == "after cut":
                 down.set()
             elif text == "restored":
@@ -146,6 +161,12 @@ class LiveDeliveryTests(unittest.TestCase):
             for result in results:
                 self.assertEqual(result["path"], paths[result["client"]])
                 self.assertEqual(result["path"][1], parent)
+            plan = nodes["Server1"].media.snapshot()
+            payload = text.encode() * 400
+            nodes["Server1"].media.publish(packetize(payload, plan["controller_id"], session,
+                                                     plan["epoch"], frame, frame * 20, frame * 4500), plan)
+            for client in ("C1", "C2"):
+                self.assertEqual(videos[client].get(timeout=3), (frame, payload))
             nodes["Server1"].broadcast(text, "MESSAGE")
             for client in ("C1", "C2"):
                 message = inboxes[client].get(timeout=3)
