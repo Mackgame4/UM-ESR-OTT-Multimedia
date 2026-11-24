@@ -4,10 +4,9 @@ from collections import OrderedDict
 import logging
 from pathlib import Path
 import re
-import select
-import socket
 import threading
 
+from src.network.udp import UDPEndpoint
 from src.streaming.packet import MAX_DATAGRAM, VideoPacket, controller_token
 from src.streaming.receiver import LiveReceiver
 
@@ -20,7 +19,7 @@ class VideoTransport:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._plan = None
-        self._socket = None
+        self._udp = None
         self.thread = None
         self._seen = OrderedDict()
         self.stats = dict(sent=0, received=0, forwarded=0, frames=0, lost_frames=0, rejected=0)
@@ -39,16 +38,8 @@ class VideoTransport:
                          reason, first, last, received, total)
 
     def start(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-            sock.bind((self.host, self.port))
-            sock.setblocking(False)
-        except OSError:
-            sock.close()
-            raise
-        self._socket = sock
-        self.port = sock.getsockname()[1]
+        self._udp = UDPEndpoint(self.host, self.port)
+        self.port = self._udp.port
         self.thread = threading.Thread(target=self._receive, daemon=True)
         self.thread.start()
         logging.info("[%s] Vídeo UDP em %s:%s; log: %s", self.node.node_id, self.host, self.port, self.log_path)
@@ -76,7 +67,7 @@ class VideoTransport:
         count = 0
         for target in targets:
             try:
-                self._socket.sendto(data, (target["host"], target["port"]))
+                self._udp.send(data, (target["host"], target["port"]))
                 count += 1
             except OSError as exc:
                 if not self._stop.is_set():
@@ -95,9 +86,9 @@ class VideoTransport:
     def _receive(self):
         while not self._stop.is_set():
             try:
-                ready, _, _ = select.select([self._socket], [], [], 0.02)
-                if ready:
-                    data, address = self._socket.recvfrom(MAX_DATAGRAM + 1)
+                datagram = self._udp.receive(MAX_DATAGRAM + 1)
+                if datagram is not None:
+                    data, address = datagram
                     self._handle(data, address)
                 with self._lock:
                     self.receiver.expire()
@@ -146,7 +137,7 @@ class VideoTransport:
             self.thread.join()
         with self._lock:
             self.receiver.discard("shutdown")
-        if self._socket:
-            self._socket.close()
+        if self._udp:
+            self._udp.close()
         self.handler.close()
         self.log.removeHandler(self.handler)
