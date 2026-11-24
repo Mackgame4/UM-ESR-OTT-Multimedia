@@ -130,21 +130,27 @@ def main():
         server, server_log = app("Server1", "--id", "Server1", "--controller",
                                  "--core-session", str(session))
         wait_for(lambda: "Bootstrapper TCP" in contents(server_log))
-        assert not (session / "R3-ott.log").exists(), "R3 started before C1"
+        wait_for(lambda: (session / "R3-ott.log").exists())
         client, client_log = app("C1", "10.0.4.20", "--id", "C1")
         wait_for(lambda: "RX HELLO de R3" in contents(client_log))
-        wait_for(lambda: "RX HELLO de R3" in contents(server_log))
         second, second_log = app("C2", "10.0.4.20", "--id", "C2")
         wait_for(lambda: "RX HELLO de R3" in contents(second_log))
         for router in ("R9", "R7", "R4"):
-            assert not (session / (router + "-ott.log")).exists(), "Unneeded router activated"
-        server.stdin.write("CORE multicast test\n")
-        server.stdin.flush()
-        for log in (client_log, second_log):
-            wait_for(lambda log=log: "RX MESSAGE de Server1: CORE multicast test" in contents(log))
-        client.stdin.write("CORE bootstrap test\n")
-        client.stdin.flush()
-        wait_for(lambda: "RX MESSAGE de C1: CORE bootstrap test" in contents(server_log))
+            wait_for(lambda router=router: (session / (router + "-ott.log")).exists())
+
+        def deliver(process, recipients, text, source):
+            deadline = time.monotonic() + 25
+            expected = "RX MESSAGE de " + source + ": " + text
+            while time.monotonic() < deadline:
+                process.stdin.write(text + "\n")
+                process.stdin.flush()
+                time.sleep(0.5)
+                if all(expected in contents(log) for log in recipients):
+                    return
+            raise RuntimeError("Delivery did not converge: " + text)
+
+        deliver(server, (client_log, second_log), "CORE multicast test", "Server1")
+        deliver(client, (server_log,), "CORE bootstrap test", "C1")
         assert "CORE bootstrap test" not in contents(second_log), "Client uplink leaked to C2"
         client.stdin.write("/quit\n")
         client.stdin.flush()
@@ -158,7 +164,7 @@ def main():
         server.wait(timeout=15)
         if client.returncode or second.returncode or server.returncode:
             raise RuntimeError("Application exited unsuccessfully")
-        print("PASS: full XML underlay; only R3 activated; multicast to C1/C2; C1 uplink only to Server1; LEAVE")
+        print("PASS: full XML underlay; control agents; on-demand routes; multicast C1/C2; isolated uplink; LEAVE")
     finally:
         print("CORE test logs:", session)
         for process in processes:

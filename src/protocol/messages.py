@@ -27,12 +27,17 @@ def decode_message(data):
 def validate_message(message):
     if not isinstance(message, dict):
         raise ValueError("A mensagem deve ser um objeto JSON")
-    if message.get("type") not in ("HELLO", "MESSAGE", "REGISTER", "NEIGHBOURS", "LEAVE", "ACK", "ERROR"):
+    if message.get("type") not in ("HELLO", "MESSAGE", "REGISTER", "NEIGHBOURS", "LEAVE", "ACK", "ERROR",
+                                   "ROUTE_REQUEST", "ROUTE_WITHDRAW"):
         raise ValueError("Tipo de mensagem desconhecido")
     if not isinstance(message.get("node_id"), str) or not message["node_id"].strip():
         raise ValueError("node_id deve ser uma string não vazia")
     if not isinstance(message.get("text"), str):
         raise ValueError("text deve ser uma string")
+    if "epoch" in message and (type(message["epoch"]) is not int or message["epoch"] < 0):
+        raise ValueError("Versão de rota inválida")
+    if "controller_id" in message and (not isinstance(message["controller_id"], str) or not message["controller_id"]):
+        raise ValueError("Identificador de controlador inválido")
     if "delivery" in message:
         if (message["type"] != "MESSAGE" or message["delivery"] not in ("MULTICAST", "UPSTREAM") or
                 not isinstance(message.get("message_id"), str) or not message["message_id"] or
@@ -42,7 +47,8 @@ def validate_message(message):
         if "routing" in message:
             routing = message["routing"]
             if (not isinstance(routing, dict) or
-                    set(routing) != {"role", "server_id", "parent_id", "children"} or
+                    not {"role", "server_id", "parent_id", "children"} <= set(routing) or
+                    not set(routing) <= {"role", "server_id", "parent_id", "children", "epoch", "controller_id"} or
                     routing["role"] not in ("server", "router", "client") or
                     not isinstance(routing["server_id"], str) or not routing["server_id"].strip() or
                     (routing["parent_id"] is not None and
@@ -50,6 +56,17 @@ def validate_message(message):
                     not isinstance(routing["children"], list) or
                     any(not isinstance(child, str) or not child.strip() for child in routing["children"])):
                 raise ValueError("Configuração de encaminhamento inválida")
+            if "epoch" in routing and (type(routing["epoch"]) is not int or routing["epoch"] < 0):
+                raise ValueError("Versão de rota inválida")
+            if "controller_id" in routing and (not isinstance(routing["controller_id"], str) or not routing["controller_id"]):
+                raise ValueError("Identificador de controlador inválido")
+        if "probe_targets" in message:
+            targets = message["probe_targets"]
+            if not isinstance(targets, list) or any(
+                    not isinstance(target, dict) or
+                    any(not isinstance(target.get(key), str) or not target[key]
+                        for key in ("id", "interface", "host")) for target in targets):
+                raise ValueError("Alvos de monitorização inválidos")
         neighbours = message.get("neighbours")
         if not isinstance(neighbours, list):
             raise ValueError("neighbours deve ser uma lista")

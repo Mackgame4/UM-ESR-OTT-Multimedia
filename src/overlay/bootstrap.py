@@ -8,22 +8,23 @@ import time
 
 from src.config import CONNECT_TIMEOUT
 from src.network.tcp import TCPConnection
+from src.routing.links import sample
 
 LOGGER = logging.getLogger(__name__)
 BOOTSTRAP_PORT = 5001
 
 
-def request(address, node_id, kind="REGISTER"):
+def request(address, node_id, kind="REGISTER", **fields):
     sock = socket.create_connection(address, timeout=CONNECT_TIMEOUT)
     connection = TCPConnection(sock, address)
     try:
-        connection.send(kind, node_id, "")
+        connection.send(kind, node_id, "", **fields)
         response = next(connection.messages(), None)
         if response is None:
             raise OSError("Bootstrapper desligado sem resposta")
         if response["type"] == "ERROR":
             raise ValueError(response["text"])
-        expected = "NEIGHBOURS" if kind == "REGISTER" else "ACK"
+        expected = "NEIGHBOURS" if kind in ("REGISTER", "ROUTE_REQUEST", "ROUTE_WITHDRAW") else "ACK"
         if response["type"] != expected:
             raise ValueError("Resposta inesperada do bootstrapper")
         return response
@@ -33,13 +34,19 @@ def request(address, node_id, kind="REGISTER"):
 
 class BootstrapController:
     def __init__(self, node_id, config, host="0.0.0.0", port=BOOTSTRAP_PORT,
-                 lease_seconds=15, activate=None):
+                 lease_seconds=15, activate=None, routes=None, node=None, interval=2, probe=sample):
         if node_id not in config["nodes"] or lease_seconds <= 0:
             raise ValueError("Controlador ou lease inválido")
         self.node_id = node_id
         self.config = config
         self.lease_seconds = lease_seconds
         self.activate = activate
+        self.routes = routes
+        self.node = node
+        self.interval = interval
+        self.probe = probe
+        self._stop = threading.Event()
+        self.worker = None
         self._members = {}
         self._registered = set()
         self._requested_routers = set()
@@ -75,9 +82,16 @@ class BootstrapController:
     def start(self):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        if self.routes:
+            self.routes.register(self.node_id, {})
+            self._apply_root()
+            self.worker = threading.Thread(target=self._maintain, daemon=True)
+            self.worker.start()
         LOGGER.info("[%s] Bootstrapper TCP em %s:%s", self.node_id, *self.server.server_address)
 
     def members(self):
+        if self.routes:
+            return sorted(self.routes.active() - {self.node_id})
         with self._lock:
             now = time.monotonic()
             self._members = {name: seen for name, seen in self._members.items()
@@ -85,7 +99,16 @@ class BootstrapController:
             return sorted(self._members)
 
     def member_statuses(self):
-        """Overlay leases plus topology-only routers; no underlay agents needed."""
+        """Distinguish registered control agents from active data relays."""
+        if self.routes:
+            self.routes.recompute()
+            active = self.routes.active()
+            used = set(self.routes.parents) | set(self.routes.parents.values())
+            return [(self.node_id, "CONTROLLER / STREAM SERVER")] + [
+                (name, ("OVERLAY ROUTER" if name in used else "CONTROL ONLY") if entry.get("router")
+                 and name in active else "OVERLAY CLIENT" if name in active else "OFFLINE")
+                for name, entry in sorted(self.config["nodes"].items())
+                if name != self.node_id and (entry.get("router") or name in active)]
         with self._lock:
             active = set(self.members())
             rows = [(self.node_id, "CONTROLLER")]
@@ -111,6 +134,9 @@ class BootstrapController:
         entry = self.config["nodes"].get(name)
         if entry is None or name == self.node_id:
             raise ValueError("Identificador não autorizado: " + name)
+        if self.routes:
+            self._handle_live(connection, message)
+            return
         if message["type"] == "LEAVE":
             with self._lock:
                 self._members.pop(name, None)
@@ -143,19 +169,71 @@ class BootstrapController:
                         routing=routing_for(self.config, name, self.node_id))
 
     def stop(self):
+        self._stop.set()
+        if self.worker:
+            self.worker.join()
         if self.thread:
             self.server.shutdown()
             self.thread.join()
         self.server.server_close()
 
+    def _apply_root(self):
+        if self.node:
+            self.node.configure_routing(**self.routes.routing(self.node_id))
+
+    def _maintain(self):
+        while not self._stop.is_set():
+            if self.activate:
+                for name, entry in self.config["nodes"].items():
+                    if entry.get("router"):
+                        try:
+                            self.activate(name)
+                        except (OSError, ValueError) as exc:
+                            LOGGER.warning("Agente %s indisponível: %s", name, exc)
+            try:
+                reports = self.probe(self.routes.targets(self.node_id))
+                self.routes.register(self.node_id, reports)
+                self._apply_root()
+            except OSError as exc:
+                LOGGER.error("Monitorização indisponível: %s", exc)
+            if self._stop.wait(self.interval):
+                break
+
+    def _handle_live(self, connection, message):
+        name, kind = message["node_id"], message["type"]
+        if kind == "REGISTER":
+            first = name not in self.routes.active()
+            self.routes.register(name, message.get("links", {}))
+            if first:
+                LOGGER.info("[%s] REGISTER %s", self.node_id, name)
+        elif kind in ("ROUTE_REQUEST", "ROUTE_WITHDRAW"):
+            if message.get("stream_id", "default") != "default":
+                raise ValueError("Stream desconhecida")
+            self.routes.subscribe(name, kind == "ROUTE_REQUEST")
+        elif kind == "LEAVE":
+            self.routes.leave(name)
+            self._apply_root()
+            LOGGER.info("[%s] LEAVE %s", self.node_id, name)
+            connection.send("ACK", self.node_id, "")
+            return
+        else:
+            raise ValueError("Mensagem de controlo inesperada")
+        self._apply_root()
+        connection.send("NEIGHBOURS", self.node_id, "", **self.routes.snapshot(name))
+
 
 class BootstrapClient:
-    def __init__(self, node, address, interval=5):
+    def __init__(self, node, address, interval=2, probe=sample):
         self.node = node
         self.address = address
         self.interval = interval
         self._stop = threading.Event()
         self.thread = None
+        self.probe = probe
+        self.targets = []
+        self.dynamic = False
+        self.subscribed = False
+        self._refresh_lock = threading.Lock()
 
     def start(self):
         # Fail clearly on an unknown ID or unavailable controller at startup.
@@ -164,7 +242,18 @@ class BootstrapClient:
         self.thread.start()
 
     def refresh(self):
-        response = request(self.address, self.node.node_id)
+        with self._refresh_lock:
+            response = request(self.address, self.node.node_id, links=self.probe(self.targets))
+            first = not self.dynamic and response.get("dynamic", False)
+            self.dynamic = response.get("dynamic", False)
+            self.targets = response.get("probe_targets", [])
+            if first and response["routing"]["role"] == "client":
+                self.subscribed = True
+            if self.dynamic and self.subscribed:
+                response = request(self.address, self.node.node_id, "ROUTE_REQUEST", stream_id="default")
+            self._install(response)
+
+    def _install(self, response):
         if "routing" in response:
             self.node.configure_routing(**response["routing"])
         for peer in response["neighbours"]:
@@ -173,6 +262,15 @@ class BootstrapClient:
             except OSError as exc:
                 LOGGER.warning("[%s] Vizinho %s indisponível; nova tentativa: %s",
                                self.node.node_id, peer["node_id"], exc)
+
+    def subscribe(self, enabled=True):
+        if not self.dynamic:
+            raise ValueError("Controlador sem rotas dinâmicas")
+        with self._refresh_lock:
+            response = request(self.address, self.node.node_id,
+                               "ROUTE_REQUEST" if enabled else "ROUTE_WITHDRAW", stream_id="default")
+            self.subscribed = enabled
+            self._install(response)
 
     def _run(self):
         while not self._stop.wait(self.interval):

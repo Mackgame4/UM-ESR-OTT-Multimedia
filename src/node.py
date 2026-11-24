@@ -28,12 +28,21 @@ class OverlayNode:
         self._routing = None
         self._seen = OrderedDict()
 
-    def configure_routing(self, role, server_id, parent_id, children):
+    def configure_routing(self, role, server_id, parent_id, children, epoch=None, controller_id=None):
         if role not in ("server", "router", "client"):
             raise ValueError("Papel de encaminhamento inválido")
         with self._lock:
+            if (epoch is not None and self._routing and self._routing.get("epoch") is not None
+                    and controller_id == self._routing.get("controller_id")
+                    and epoch < self._routing["epoch"]):
+                return
             self._routing = dict(role=role, server_id=server_id,
-                                 parent_id=parent_id, children=set(children))
+                                 parent_id=parent_id, children=set(children), epoch=epoch,
+                                 controller_id=controller_id)
+            obsolete = [peer for peer in self._connections if epoch is not None
+                        and peer.node_id is not None and peer.node_id not in set(children) | {parent_id}]
+        for peer in obsolete:
+            peer.close()
 
     def _remember(self, message_id):
         with self._lock:
@@ -49,6 +58,10 @@ class OverlayNode:
             peers = [peer for peer in self._connections if peer.node_id in peer_ids]
         count = 0
         fields = {key: message[key] for key in ("delivery", "message_id", "ttl")}
+        if "epoch" in message:
+            fields["epoch"] = message["epoch"]
+        if "controller_id" in message:
+            fields["controller_id"] = message["controller_id"]
         for peer in peers:
             try:
                 peer.send("MESSAGE", message["node_id"], message["text"], **fields)
@@ -59,6 +72,9 @@ class OverlayNode:
 
     def _route_received(self, connection, message):
         routing = self._routing
+        if routing.get("epoch") is not None and (message.get("epoch") != routing["epoch"] or
+                message.get("controller_id") != routing.get("controller_id")):
+            return  # Route installation is polled; never mix different trees.
         mode = message.get("delivery")
         if mode == "MULTICAST":
             if (connection.node_id != routing["parent_id"] or
@@ -189,6 +205,10 @@ class OverlayNode:
                 raise ValueError("Routers apenas reencaminham mensagens")
             message = dict(node_id=self.node_id, text=text, message_id=uuid.uuid4().hex,
                            ttl=64, delivery="MULTICAST" if routing["role"] == "server" else "UPSTREAM")
+            if routing.get("epoch") is not None:
+                message["epoch"] = routing["epoch"]
+                if routing.get("controller_id") is not None:
+                    message["controller_id"] = routing["controller_id"]
             self._remember(message["message_id"])
             targets = routing["children"] if routing["role"] == "server" else {routing["parent_id"]}
             return self._forward(message, targets)

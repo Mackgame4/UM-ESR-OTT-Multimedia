@@ -1,151 +1,149 @@
 ﻿# esr-ott
 
-Universidade do Minho ESR TP2: application-level overlay network for multimedia
-delivery in the CORE emulator. Python standard library only. TCP carries control
-messages; UDP video streaming is reserved for a later stage.
+Projeto ESR TP2: rede overlay multicast para distribuição multimédia no CORE.
+O plano de controlo e a demonstração de mensagens usam TCP. O vídeo por UDP
+continua por implementar. A aplicação Python usa apenas a biblioteca standard;
+a monitorização na VM Linux requer `ping` (iputils).
 
-## Estratégia 2 — controlador e routers a pedido
+## Estratégia 2 — servidor como bootstrapper e controlador
 
-**Server1 é o servidor e bootstrapper e deve permanecer ativo.** O utilizador
-inicia manualmente apenas o servidor e os clientes. Server1 inicia os processos
-overlay nos routers necessários quando recebe o registo de um cliente.
+O **servidor de streaming é também o bootstrapper do seu overlay**. Não existe
+um bootstrapper independente num router: sem o servidor não existe a fonte do
+stream. Server1 ou Server2 pode assumir este papel através de `--controller`.
+Cada execução gere o seu próprio overlay; não existe eleição, replicação de
+estado ou transferência automática de clientes entre servidores.
 
-Não existe configuração manual do overlay. Server1 lê a topologia física de
-[`topology/topology.xml`](topology/topology.xml) e identifica o router de acesso
-de cada cliente usando BFS. Só esse router executa a aplicação overlay e liga-se
-diretamente ao servidor. Os routers intermédios encaminham os pacotes por IP,
-através das rotas do CORE; não precisam de executar a aplicação.
+O XML `topology/topology.xml` fornece apenas os nomes, endereços, interfaces e
+ligações candidatas iniciais. O estado atual das ligações é descoberto através
+de sondas periódicas; cortar uma ligação não exige editar ou reler o XML.
+Ligações completamente novas, ausentes do XML, ainda exigem atualizar o inventário.
 
-Para C1, o caminho calculado é:
+### Funcionamento
 
-```text
-Server1 <-> R3 <-> C1
-              <-> C2
-```
+1. O servidor inicia automaticamente um agente de controlo em cada router da
+   sessão CORE. Estes agentes registam-se e recebem os vizinhos físicos a testar.
+2. Servidor, routers e clientes testam os seus vizinhos com `ping`, preso à
+   interface local (`-I`) e limitado a um salto IP (`-t 1`). Um percurso alternativo
+   do OSPF não faz uma ligação direta cortada parecer operacional.
+3. Os relatórios seguem para o servidor em renovações REGISTER. Uma ligação só
+   está disponível se ambos os extremos a reportarem operacional e tiverem registo
+   válido. Relatórios ausentes não são interpretados como ligações disponíveis.
+4. Ao iniciar, o cliente regista-se e envia explicitamente ROUTE_REQUEST para
+   a stream `default`. `/unsubscribe` retira o pedido e `/subscribe` volta a ativá-lo.
+5. O servidor calcula uma árvore de caminhos mínimos com BFS sobre o grafo vivo.
+   A métrica é **número de saltos overlay**, custo unitário por ligação candidata
+   entre dispositivos. Switches são transparentes e clientes não servem de trânsito.
+6. Apenas os caminhos de clientes subscritos e alcançáveis integram a árvore de
+   dados. O servidor distribui a cada nó o pai, os filhos e a versão da árvore.
+7. Ao detetar um corte, uma recuperação ou uma lease expirada, recalcula as rotas.
+   Os nós recolhem as atualizações nas renovações, fecham ligações obsoletas e
+   estabelecem as novas. Os empates são resolvidos pela ordem dos nomes dos nós.
 
-1. C1 envia REGISTER para Server1, identificando-se.
-2. Server1 inicia a aplicação em R3 através de `vcmd`, no router existente
-   da sessão CORE. Não cria novos routers físicos.
-3. R3 regista-se e recebe Server1 como vizinho.
-4. C1 recebe R3 como vizinho e liga-se diretamente a ele por TCP.
-5. Cada ligação é full-duplex; apenas a extremidade mais distante de Server1
-   inicia a ligação.
+Os relatórios são recolhidos aproximadamente a cada **2 segundos**, acrescidos
+do tempo das sondas/ligações. As leases expiram após **15 segundos** sem renovação.
+Uma falha de ligação pode ser detetada por qualquer dos extremos; para a recuperar,
+ambos precisam de voltar a confirmar disponibilidade.
 
-Só são ativados os routers dos caminhos pedidos. C2 reutiliza os mesmos routers
-de C1. Os restantes routers continuam a encaminhar IP sem executar o overlay.
+### Agentes de controlo e distribuição multicast
+
+Para descobrir alternativas sem depender exclusivamente do OSPF, os routers
+candidatos precisam de um agente Python de controlo. A otimização anterior de
+executar Python apenas em R3 foi substituída por esta separação:
+
+- **CONTROL ONLY**: agente registado e a testar ligações, sem ramo de dados ativo.
+- **OVERLAY ROUTER**: agente também a encaminhar dados para clientes subscritos.
+- **OFFLINE**: não existe registo válido; não é utilizado em novos caminhos.
+
+O processo de cada router é reutilizado; não é iniciado um processo por cliente
+ou por pedido. Não existe tráfego de dados nos ramos sem subscritores, embora
+continuem as sondas e as mensagens de controlo.
+
+O servidor envia uma cópia por ramo partilhado. Um router replica essa cópia
+apenas nas bifurcações. Mensagens de C1 sobem apenas até ao servidor e não são
+reenviadas para C2. A origem é preservada; os routers não originam texto.
+
+Cada MESSAGE tem ID, TTL e versão da árvore. Duplicados recentes são descartados.
+Durante a convergência, mensagens de versões diferentes são descartadas para não
+misturar árvores. Pode haver perda temporária; não existe instalação atómica,
+buffering nem garantia de entrega durante uma mudança de rota.
 
 ## Executar na VM CORE
 
-Abrir `topology/topology.xml` no CORE da VM e iniciar a emulação. Python 3 e o
-projeto devem estar acessíveis no filesystem partilhado dos nós. Confirmar que
-C1 consegue executar `ping 10.0.4.20` antes de arrancar a aplicação.
+Abrir `topology/topology.xml`, iniciar a emulação e esperar pela conectividade IP.
+O encaminhamento IP do CORE continua necessário para as mensagens de controlo
+chegarem ao servidor. Os agentes descobrem a topologia disponível; não configuram
+rotas IP nem substituem o OSPF.
 
-Na raiz do projeto, no terminal CORE de **Server1**:
+Na raiz do projeto, no terminal de Server1:
 
 ```sh
 python3 -m src.main --controller --id Server1
 ```
 
-Depois, manualmente no terminal CORE de **C1**:
+Manualmente, nos terminais dos clientes:
 
 ```sh
+# C1
 python3 -m src.main 10.0.4.20 --id C1
+# C2
+python3 -m src.main 10.0.4.20 --id C2
 ```
 
-No terminal de **C2**, executar `python3 -m src.main 10.0.4.20 --id C2`.
-Ao atualizar uma sessão que usava processos antigos em R9/R7/R4, reiniciar a
-sessão CORE antes de executar estes comandos para limpar esses processos.
+O servidor lança os agentes; não são necessários comandos manuais nos routers.
+Bootstrap usa TCP **5001**, ligações de dados/controlo entre vizinhos usam TCP
+**5000**. O projeto deve estar acessível no filesystem partilhado dos nós.
 
-Não é necessário executar comandos nos routers. O identificador deve corresponder
-ao nome no XML; por omissão usa-se o hostname.
+A sessão CORE é detetada automaticamente. Se existirem várias sessões, indicar
+o diretório correto: `--core-session /tmp/pycore.12345`. `--topology CAMINHO`
+permite escolher outro inventário XML. Os logs dos agentes ficam nesse diretório,
+por exemplo `R3-ott.log`. Reiniciar a sessão após atualizar versões antigas para
+remover os processos anteriores.
 
-O bootstrapper usa TCP **5001**; os vizinhos overlay usam TCP **5000**. A sessão
-CORE é identificada automaticamente se existir uma única sessão com os canais
-dos nós esperados. Se necessário, indicar o diretório real:
+Também é possível usar Server2 como servidor/bootstrapper:
 
 ```sh
-python3 -m src.main --controller --id Server1 --core-session /tmp/pycore.12345
+# Server2
+python3 -m src.main --controller --id Server2
+# Cliente que pretende essa fonte
+python3 -m src.main 10.0.3.21 --id C1
 ```
 
-`--topology CAMINHO` escolhe outro XML físico. O lançamento remoto usa os canais
-`vcmd` dentro da VM CORE: um endereço IP, por si só, não permite iniciar processos
-noutra máquina. Os logs ficam no diretório da sessão, por exemplo `R3-ott.log`.
+Testar servidores separadamente: a execução simultânea de dois overlays nos
+mesmos routers/portas não é suportada nesta fase.
 
-## Registo, abandono e falhas
+## Comandos
 
-- Cada nó renova o registo a cada **5 segundos**. Após **15 segundos** sem
-  renovação, deixa de aparecer em `/members` no servidor.
-- `/quit` e Ctrl+C enviam LEAVE. Uma falha abrupta é tratada pela expiração
-  do registo e pelo fecho da ligação TCP.
-- As renovações voltam a tentar ligar aos vizinhos indisponíveis, incluindo
-  routers que ainda estão a arrancar.
-- Os routers iniciados ficam disponíveis até o servidor terminar, mesmo depois
-  de sair o último cliente. Ainda não existe remoção automática por falta de uso.
-- Server1 é um ponto único de falha: novos registos e a criação de routers
-  dependem dele. Ligações existentes entre outros nós podem continuar abertas.
-- Os caminhos são calculados a partir do XML no arranque; ainda não existe
-  recálculo automático após alterações físicas ou falhas de routers.
+- `/members`: no servidor, lista clientes e distingue CONTROL ONLY, OVERLAY ROUTER
+  e OFFLINE. Deixamos de chamar UNDERLAY ONLY aos routers com agente de controlo.
+- `/routes`: no servidor, mostra cliente, stream, caminho, saltos, estado ACTIVE
+  ou UNREACHABLE e versão. Sem pedidos, a árvore de dados fica vazia.
+- `/subscribe` e `/unsubscribe`: pedir ou deixar de receber a stream `default`.
+- `/peers`: vizinhos TCP diretamente ligados; não representa todos os destinatários.
+- `/hello`: testar apenas vizinhos diretos.
+- Texto em servidor: multicast para os clientes subscritos e alcançáveis.
+- Texto em cliente: enviar apenas para o servidor pelo caminho instalado.
+- `/quit` ou Ctrl+C: enviar LEAVE e terminar. Falhas abruptas usam a lease.
 
-## Comandos e protocolo
-
-- `/peers`: listar vizinhos ligados.
-- `/members`: listar clientes ativos e o estado dos routers, apenas no controlador.
-- `/hello`: enviar HELLO aos vizinhos.
-- Texto livre em Server1: multicast MESSAGE para todos os clientes ligados.
-- Texto livre num cliente: enviar MESSAGE apenas para Server1 através do router.
-- `/connect HOST:PORT`: acrescentar um vizinho manualmente.
-- `/quit`: sair.
-
-Exemplo de `/members` com C1 e C2 ligados:
-
-```text
-Server1 (CONTROLLER)
-C1 (OVERLAY CLIENT)
-C2 (OVERLAY CLIENT)
-R3 (OVERLAY ROUTER)
-R4 (UNDERLAY ONLY)
-R7 (UNDERLAY ONLY)
-R9 (UNDERLAY ONLY)
-```
-
-São mostrados todos os routers conhecidos do XML. `UNDERLAY ONLY` identifica
-routers sem aplicação overlay iniciada/registada pelo controlador; não exige
-Python nesses nós e não indica uma verificação da sua disponibilidade IP.
-`OVERLAY NOT REGISTERED` indica que o lançamento foi pedido mas ainda não houve
-registo; `OVERLAY INACTIVE` indica um nó anteriormente registado que saiu ou cuja
-lease expirou. Um router inativo não é confundido com um router apenas underlay.
-
-O multicast é feito pela aplicação sobre TCP: Server1 envia uma cópia por ramo
-overlay e R3 replica-a para C1 e C2. Mensagens de C1 seguem apenas para Server1,
-sem eco para C1 nem entrega a C2. Routers apenas reencaminham; não originam texto.
-`/hello` continua a testar apenas o vizinho direto. O modo manual anterior mantém
-o envio apenas para vizinhos diretos. Streaming de vídeo ainda não está implementado.
-
-Cada MESSAGE encaminhado preserva o identificador da origem e inclui `delivery`
-(`MULTICAST` ou `UPSTREAM`), `message_id` e `ttl`. Os nós descartam duplicados
-recentes e limitam os saltos. A identidade do vizinho TCP é estabelecida pelo
-HELLO e não muda quando passa uma mensagem de outra origem.
-
-As mensagens são objetos JSON UTF-8 terminados por newline, até 65536 bytes.
-Tipos: HELLO, MESSAGE, REGISTER, NEIGHBOURS, LEAVE, ACK e ERROR. JSON é apenas
-a codificação das mensagens TCP; não existe ficheiro JSON da topologia overlay.
-O registo assume um ambiente CORE de confiança, sem autenticação dos IDs.
-
-## Modo manual anterior
-
-Continua disponível para testes locais:
+O modo anterior de testes manuais continua disponível com `--peer HOST:PORT`,
+sem controlo dinâmico nem reencaminhamento automático:
 
 ```sh
 python -m src.main --id A
 python -m src.main --id B --port 5002 --peer 127.0.0.1:5000
 ```
 
-## Testes
+## Limites e testes
 
-Testes com sockets locais, sem CORE:
+A stream `default` representa atualmente o canal de demonstração MESSAGE, não
+uma transmissão de vídeo. A rede CORE é considerada de confiança, sem autenticação
+dos IDs/relatórios. Uma partição sem caminho disponível aparece como UNREACHABLE;
+o controlador não consegue criar conectividade que a rede física não oferece.
 
 ```sh
 python -m unittest discover -s tests
 ```
 
-Para testar dentro da VM CORE, consultar [o guia](topology/README.md).
+Os testes incluem cortes, recuperação, partições, expiração de routers, ativação
+por pedido e entrega multicast/upstream através de sockets TCP reais. As sondas
+são simuladas nestes testes. Para validar cortes físicos e sondas reais na VM,
+consultar [o guia CORE](topology/README.md).

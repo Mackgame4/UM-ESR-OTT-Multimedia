@@ -1,4 +1,4 @@
-"""Start on-demand overlay processes inside an existing CORE VM session via vcmd."""
+"""Start router control agents inside an existing CORE VM session via vcmd."""
 
 import logging
 import subprocess
@@ -53,7 +53,7 @@ class CoreLauncher:
             self.processes[name] = subprocess.Popen(
                 command, cwd=Path(__file__).resolve().parents[2],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-            logging.info("Ativado overlay em %s; log: %s", name, log.name)
+            logging.info("Agente de controlo iniciado em %s; log: %s", name, log.name)
 
     def stop(self):
         with self._lock:

@@ -5,12 +5,14 @@ import logging
 import socket
 import signal
 import threading
+import shutil
 
 from src.config import DEFAULT_HOST, DEFAULT_PORT
 from src.node import OverlayNode
-from src.overlay.bootstrap import BOOTSTRAP_PORT, BootstrapClient, BootstrapController, routing_for
+from src.overlay.bootstrap import BOOTSTRAP_PORT, BootstrapClient, BootstrapController
 from src.overlay.core import CoreLauncher
 from src.overlay.topology import load_topology
+from src.routing.controller import LiveRoutes
 
 
 def port_number(value):
@@ -64,17 +66,19 @@ def run(argv=None):
     stopped = threading.Event()
     previous_handler = signal.signal(signal.SIGTERM, lambda *_: stopped.set())
     try:
+        if (args.controller or args.bootstrapper) and shutil.which("ping") is None:
+            raise ValueError("O controlo dinâmico requer ping (iputils) na VM Linux")
         node.start()
         if args.controller:
             config = load_topology(args.topology, args.id, args.port)
-            node.configure_routing(**routing_for(config, args.id, args.id))
             entry = config["nodes"].get(args.id)
-            if entry is None or entry["port"] != node.port:
+            if entry is None or not entry.get("server") or entry["port"] != node.port:
                 raise ValueError("ID/porta do controlador não corresponde à configuração")
             launcher = CoreLauncher(args.core_session,
                                     "{}:{}".format(entry["host"], args.bootstrap_port), config, args.id)
             controller = BootstrapController(args.id, config, args.host,
-                                             args.bootstrap_port, activate=launcher)
+                                             args.bootstrap_port, activate=launcher,
+                                             routes=LiveRoutes(config, args.id), node=node)
             controller.start()
         elif args.bootstrapper:
             client = BootstrapClient(node, args.bootstrapper)
@@ -87,7 +91,7 @@ def run(argv=None):
         if args.headless:
             stopped.wait()
             return 0
-        print("Comandos: /hello, /peers, /members, /connect HOST:PORT, /quit. "
+        print("Comandos: /hello, /peers, /members, /routes, /subscribe, /unsubscribe, /connect HOST:PORT, /quit. "
               "Texto: servidor envia a todos os clientes; cliente envia ao servidor.", flush=True)
         while not stopped.is_set():
             try:
@@ -96,7 +100,26 @@ def run(argv=None):
                 break
             if command == "/quit":
                 break
-            if command == "/members":
+            if command == "/routes":
+                if controller and controller.routes:
+                    rows = controller.routes.table()
+                    for row in rows:
+                        print("{} / {}: {}; saltos={}; versão={}; {}".format(
+                            row["client"], row["stream"], row["state"], row["hops"], row["epoch"],
+                            " -> ".join(row["path"])), flush=True)
+                    if not rows:
+                        print("Sem pedidos de stream ativos.", flush=True)
+                else:
+                    print("Disponível apenas no controlador.", flush=True)
+            elif command in ("/subscribe", "/unsubscribe"):
+                try:
+                    if client is None:
+                        raise ValueError("Disponível apenas nos clientes")
+                    client.subscribe(command == "/subscribe")
+                    print("Pedido de stream atualizado.", flush=True)
+                except (OSError, ValueError) as exc:
+                    print(str(exc), flush=True)
+            elif command == "/members":
                 if controller:
                     for name, status in controller.member_statuses():
                         print("{} ({})".format(name, status), flush=True)
